@@ -113,8 +113,6 @@ impl <'a> BufferPoolManager<'a> {
             let page = pages_read_locked.write().unwrap();
             if page.is_dirty() {
                 assert!(page.page_id().is_some(), "Expecting the page to be not dirty if page_id undefined");
-                println!("page_id {}", page.page_id().unwrap());
-                println!("data {:?}", page.read());
                 self.disk_manager.write_page(page.page_id().unwrap(), &page.read()).unwrap();
             }
 
