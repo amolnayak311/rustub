@@ -31,7 +31,7 @@ pub struct BufferPoolManager<'a> {
     replacer: LRUKReplacer,
     // /** Pointer to the log manager. Please ignore this for P1. */
     // LogManager *log_manager_ __attribute__((__unused__));
-    replacer_k: usize,
+    //replacer_k: usize,
 }
 
 impl <'a> BufferPoolManager<'a> {
@@ -55,14 +55,14 @@ impl <'a> BufferPoolManager<'a> {
             free_list: RwLock::new(free_list),
             page_table: RwLock::new(HashMap::with_capacity(pool_size)),
             replacer: LRUKReplacer::new(replacer_k),
-            replacer_k
+            //replacer_k
         }
     }
 
 
     ///  Return the size (number of frames) of the buffer pool
     pub fn get_pool_size(&self) -> usize {
-        unimplemented!()
+        self.pool_size
     }
 
     // Return the iterator to all the pages in the buffer pool
@@ -217,7 +217,7 @@ impl <'a> BufferPoolManager<'a> {
     /// @param access_type type of access to the page, only needed for leaderboard tests.
     /// @return false if the page is not in the page table or its pin count is <= 0 before this call, true otherwise
     ///
-    fn unpin_page(&self, page_id: u64, is_dirty: bool, access_type: AccessType) -> bool {
+    pub fn unpin_page(&self, page_id: u64, is_dirty: bool, _access_type: AccessType) -> bool {
         let page_table = self.page_table.read().unwrap();
         if let Some(frame_id) = page_table.get(&page_id) {
             let frame_id = *frame_id;
@@ -234,7 +234,6 @@ impl <'a> BufferPoolManager<'a> {
     }
 
     ///
-    /// TODO(P1): Add implementation
     ///
     /// @brief Flush the target page to disk.
     ///
@@ -244,8 +243,16 @@ impl <'a> BufferPoolManager<'a> {
     /// @param page_id id of page to be flushed, cannot be INVALID_PAGE_ID
     /// @return false if the page could not be found in the page table, true otherwise
     ///
-    fn flush_page(&self, page_id: u64) -> bool {
-        unimplemented!()
+    pub fn flush_page(&self, page_id: u64) -> bool {
+        match self.page_table.read().unwrap().get(&page_id) {
+            Some(frame)  => {
+                let p = self.pages[*frame].write().unwrap();
+                self.disk_manager.write_page(page_id, &p.read()).unwrap();
+                p.unset_dirty();
+                true
+            },
+            None                   => false
+        }
     }
 
     ///
@@ -253,7 +260,7 @@ impl <'a> BufferPoolManager<'a> {
     ///
     /// @brief Flush all the pages in the buffer pool to disk.
     ///
-    fn flush_all_pages(&self) {
+    pub fn flush_all_pages(&self) {
         unimplemented!()
     }
 
@@ -271,7 +278,7 @@ impl <'a> BufferPoolManager<'a> {
     /// @param page_id id of page to be deleted
     /// @return false if the page exists but could not be deleted, true if the page didn't exist or deletion succeeded
     ///
-    fn delete_page(&self, page_id: u64) -> bool {
+    pub fn delete_page(&self, _page_id: u64) -> bool {
         unimplemented!()
     }
 
@@ -298,7 +305,7 @@ mod test {
 
 
     #[test]
-    fn basic_test() {
+    fn basic_test_1() {
 
         use rand::Rng;
 
@@ -358,64 +365,84 @@ mod test {
             acc && *lhs == rhs));
 
         std::fs::remove_file(&file_name).unwrap();
+     }
 
-//     }
+
+    #[test]
+    fn basic_test_2() {
+
+        let file_name = format!("test_db_file_{:?}", thread::current().id());
+        let buffer_pool_size = 10;
+        let replacer_k = 5;
+        let dm = DiskManager::new(&file_name);
+        let bpm = BufferPoolManager::new(&dm, buffer_pool_size, replacer_k);
+
+        let page_option = bpm.new_page();
+        assert!(page_option.is_some(), "Expected to see a page created");
+        let page = page_option.unwrap();
+        assert_eq!(0, page.page_id().unwrap());
+        let src = "Hello World".as_bytes();
+        let mut data: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
+        data[0..src.len()].copy_from_slice(src);
+        page.write(&data);
+
+        // Needed else, the RwLockWriteGuard acquired here causes deadlock in unpin calls
+        drop(page);
+
+        // Scenario: We should be able to create new pages until we fill up the buffer pool.
+        for _ in 1..buffer_pool_size {
+            assert!(bpm.new_page().is_some());
+        }
+
+        // Scenario: Once the buffer pool is full, we should not be able to create any new pages.
+        for _ in 0..buffer_pool_size {
+            assert!(bpm.new_page().is_none());
+        }
+
+        // Scenario: After unpinning pages {0, 1, 2, 3, 4} and pinning another 4 new pages,
+        // there would still be one buffer page left for reading page 0.
+        // for (int i = 0; i < 5; ++i) {
+        //     EXPECT_EQ(true, bpm->UnpinPage(i, true));
+        // }
+        for page_id in 0..5 {
+            assert!(bpm.unpin_page(page_id, true, AccessType::Unknown))
+        }
+
+        // for (int i = 0; i < 4; ++i) {
+        //     EXPECT_NE(nullptr, bpm->NewPage(&page_id_temp));
+        // }
+        for _ in 0..4 {
+            let new_page = bpm.new_page();
+            assert!(new_page.is_some());
+        }
+
+        // Scenario: We should be able to fetch the data we wrote a while ago.
+        // Page 0 was evicted and was dirty and now with fetch_page it will fetch from disk and original
+        // content should be visible
+        let page = bpm.fetch_page(0, AccessType::Unknown);
+        assert!(page.is_some());
+        assert!(page.unwrap().read().iter().zip(data).fold(true, |acc, (lhs, rhs)|
+            acc && *lhs == rhs));
+
+
+        // Scenario: If we unpin page 0 and then make a new page, all the buffer pages should
+        // now be pinned. Fetching page 0 again should fail.
+        // Unpinning will let this page be evicted and new page creation succeed
+        assert!(bpm.unpin_page(0, true, AccessType::Unknown));
+        // This should succeed, since its new, the page is pinned by default, which means all pages are now pinned
+        // and none be evictable
+        assert!(bpm.new_page().is_some());
+        // Now fetching any page not in buffer should fail as no page can be evicted
+        assert!(bpm.fetch_page(0, AccessType::Unknown).is_none());
 //
-// // NOLINTNEXTLINE
-//     TEST(BufferPoolManagerTest, DISABLED_SampleTest) {
-// const std::string db_name = "test.db";
-// const size_t buffer_pool_size = 10;
-// const size_t k = 5;
-//
-// auto *disk_manager = new DiskManager(db_name);
-// auto *bpm = new BufferPoolManager(buffer_pool_size, disk_manager, k);
-//
-// page_id_t page_id_temp;
-// auto *page0 = bpm->NewPage(&page_id_temp);
-//
-// // Scenario: The buffer pool is empty. We should be able to create a new page.
-// ASSERT_NE(nullptr, page0);
-// EXPECT_EQ(0, page_id_temp);
-//
-// // Scenario: Once we have a page, we should be able to read and write content.
-// snprintf(page0->GetData(), BUSTUB_PAGE_SIZE, "Hello");
-// EXPECT_EQ(0, strcmp(page0->GetData(), "Hello"));
-//
-// // Scenario: We should be able to create new pages until we fill up the buffer pool.
-// for (size_t i = 1; i < buffer_pool_size; ++i) {
-// EXPECT_NE(nullptr, bpm->NewPage(&page_id_temp));
-// }
-//
-// // Scenario: Once the buffer pool is full, we should not be able to create any new pages.
-// for (size_t i = buffer_pool_size; i < buffer_pool_size * 2; ++i) {
-// EXPECT_EQ(nullptr, bpm->NewPage(&page_id_temp));
-// }
-//
-// // Scenario: After unpinning pages {0, 1, 2, 3, 4} and pinning another 4 new pages,
-// // there would still be one buffer page left for reading page 0.
-// for (int i = 0; i < 5; ++i) {
-// EXPECT_EQ(true, bpm->UnpinPage(i, true));
-// }
-// for (int i = 0; i < 4; ++i) {
-// EXPECT_NE(nullptr, bpm->NewPage(&page_id_temp));
-// }
-//
-// // Scenario: We should be able to fetch the data we wrote a while ago.
-// page0 = bpm->FetchPage(0);
-// ASSERT_NE(nullptr, page0);
-// EXPECT_EQ(0, strcmp(page0->GetData(), "Hello"));
-//
-// // Scenario: If we unpin page 0 and then make a new page, all the buffer pages should
-// // now be pinned. Fetching page 0 again should fail.
-// EXPECT_EQ(true, bpm->UnpinPage(0, true));
-// EXPECT_NE(nullptr, bpm->NewPage(&page_id_temp));
-// EXPECT_EQ(nullptr, bpm->FetchPage(0));
-//
-// // Shutdown the disk manager and remove the temporary file we created.
-// disk_manager->ShutDown();
-// remove("test.db");
-//
-// delete bpm;
-// delete disk_manager;
+
+        std::fs::remove_file(&file_name).unwrap();
+
+        // Shutdown the disk manager and remove the temporary file we created.
+        // disk_manager->ShutDown();
+        // remove("test.db");
+        //
+        // delete bpm;
+        // delete disk_manager;
     }
 }

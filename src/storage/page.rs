@@ -39,6 +39,10 @@ impl Page {
         self.is_dirty.store(true, Ordering::Release);
     }
 
+    pub fn unset_dirty(&self) {
+        self.is_dirty.store(false, Ordering::Release);
+    }
+
     pub fn new() -> Self {
         Self {
             page_id: None,
