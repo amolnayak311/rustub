@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockWriteGuard};
 use crate::buffer::lru_k_replacer::AccessType;
 use crate::buffer::LRUKReplacer;
-use crate::storage::{DiskManager, Page, PAGE_SIZE};
+use crate::storage::{DiskManager, Page, PAGE_SIZE, WritePageGuard};
 
 // Contents taken from https://github.com/cmu-db/bustub/blob/master/src/include/buffer/buffer_pool_manager.h
 pub struct BufferPoolManager<'a> {
@@ -151,7 +151,6 @@ impl <'a> BufferPoolManager<'a> {
 
 
     ///
-    /// TODO(P1): Add implementation
     ///
     /// @brief Fetch the requested page from the buffer pool. Return nullptr if page_id needs to be fetched from the disk
     /// but all frames are currently in use and not evictable (in another word, pinned).
@@ -174,6 +173,8 @@ impl <'a> BufferPoolManager<'a> {
             // Page already in memory
             let frame_id = *frame_id;
             drop(page_table);
+            self.replacer.record_access(frame_id);
+            self.replacer.set_evictable(frame_id, false);
             Some(self.pages[frame_id].write().unwrap())
         } else {
             drop(page_table);
@@ -201,7 +202,12 @@ impl <'a> BufferPoolManager<'a> {
     ///
     // fn fetch_page_basic(page_id: u64) -> BasicPageGuard;
     // fn fetch_page_read(page_id: u64) -> ReadPageGuard;
-    // fn fetch_page_write(page_id: u64) -> WritePageGuard;
+    pub  fn fetch_page_write(&self, page_id: u64, access_type: AccessType) -> Option<WritePageGuard<'_, '_>> {
+        match self.fetch_page(page_id, access_type) {
+            x @ Some(_) => Some(WritePageGuard::new(&self, x.unwrap())),
+            None => None
+        }
+    }
     ////
 
     ///
@@ -282,6 +288,13 @@ impl <'a> BufferPoolManager<'a> {
         unimplemented!()
     }
 
+    pub fn is_evictable(&self, page_id: u64) -> bool {
+        let unlocked_page_table = self.page_table.read().unwrap();
+        match unlocked_page_table.get(&page_id) {
+            Some(frame_id) => self.replacer.is_evictable(*frame_id),
+            None                   => false
+        }
+    }
 
 
 }
@@ -293,16 +306,6 @@ mod test {
     use crate::buffer::BufferPoolManager;
     use crate::buffer::lru_k_replacer::AccessType;
     use crate::storage::{DiskManager, PAGE_SIZE};
-
-    // #[test]
-    // fn test_create_buffer_pool() {
-    //     let file_name = format!("test_db_file_{:?}", thread::current().id());
-    //
-    //     let dm = DiskManager::new(&file_name);
-    //     let _ = BufferPoolManager::new(&dm, 2, 2);
-    //     std::fs::remove_file(&file_name).unwrap();
-    // }
-
 
     #[test]
     fn basic_test_1() {
@@ -445,4 +448,51 @@ mod test {
         // delete bpm;
         // delete disk_manager;
     }
+
+    #[test]
+    fn test_page_write_guard() {
+        use rand::Rng;
+
+        let file_name = format!("test_db_file_{:?}", thread::current().id());
+        let buffer_pool_size = 10;
+        let replacer_k = 5;
+        let dm = DiskManager::new(&file_name);
+        let bpm = BufferPoolManager::new(&dm, buffer_pool_size, replacer_k);
+
+
+        let page_option = bpm.new_page();
+        assert!(page_option.is_some(), "Expected to see a page created");
+        let page = page_option.unwrap();
+        assert_eq!(0, page.page_id().unwrap());
+        let mut rng = thread_rng();
+        let mut page_data = [0u8; PAGE_SIZE];
+        for i in 0..PAGE_SIZE {
+            page_data[i] = rng.gen();
+        }
+        page.write(&page_data);
+        assert!(page.read().iter().zip(page_data).fold(true, |acc, (lhs, rhs)|
+            acc && *lhs == rhs));
+        drop(page);
+
+        // Assuming page 0 is in frame 0
+        // Initially the page is not evictable
+        assert!(!bpm.is_evictable(0));
+        bpm.unpin_page(0, false, AccessType::Unknown);
+        // After unpin, it should become evictable
+        assert!(bpm.is_evictable(0));
+        {
+            let guarded_page = bpm.fetch_page_write(0, AccessType::Unknown);
+            assert!(guarded_page.is_some());
+            let write_guard = guarded_page.unwrap();
+            // assert the data is correct and as expected
+            assert!(write_guard.read().iter().zip(page_data).fold(true, |acc, (lhs, rhs)|
+                acc && *lhs == rhs));
+            // After getting the guarded page it should again be non evictable
+            assert!(!bpm.is_evictable(0));
+        }
+        // the page guard is no longer in scope and dropped, after guarded_page goes out of scope, the page again is evictable
+        assert!(bpm.is_evictable(0));
+        std::fs::remove_file(&file_name).unwrap();
+    }
+
 }

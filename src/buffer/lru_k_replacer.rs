@@ -174,6 +174,13 @@ impl LRUKReplacer {
         }
     }
 
+    pub fn is_evictable(&self, frame_id: usize) -> bool {
+        self.page_to_node_mapping.read()
+            .unwrap()
+            .get(&frame_id).map(|node|
+            *node.is_evictable.borrow()).or_else(|| Some(false)).unwrap()
+    }
+
     pub fn size(&self) -> usize {
         self.kpq.read().unwrap().len()
     }
@@ -335,7 +342,10 @@ mod test {
         lru_replacer.set_evictable(3, true);
         lru_replacer.set_evictable(4, true);
         lru_replacer.set_evictable(5, true);
+        assert!(lru_replacer.is_evictable(6));
         lru_replacer.set_evictable(6, false);
+        assert!(!lru_replacer.is_evictable(6));
+
 
         assert_eq!(5, lru_replacer.size());
 

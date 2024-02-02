@@ -1,5 +1,8 @@
-use std::sync::{RwLock, RwLockReadGuard};
+use std::ops::Deref;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::sync::atomic::{AtomicBool, Ordering};
+use crate::buffer::BufferPoolManager;
+use crate::buffer::lru_k_replacer::AccessType;
 
 pub const PAGE_SIZE: usize = 4096;
 pub struct Page {
@@ -8,6 +11,33 @@ pub struct Page {
     data: RwLock<[u8; PAGE_SIZE]>,
 
 }
+
+// Just implement the WritePageGuard for now
+pub struct WritePageGuard<'a, 'b> {
+    page: RwLockWriteGuard<'a, Page>,
+    bpm: &'b BufferPoolManager<'b>,
+}
+
+impl <'a, 'b> WritePageGuard<'a, 'b> {
+
+    pub fn new(bpm: &'b BufferPoolManager, page: RwLockWriteGuard<'a, Page>) -> Self {
+        Self{page, bpm}
+    }
+}
+impl <'a> Deref for WritePageGuard<'a, '_> {
+    type Target = RwLockWriteGuard<'a, Page>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.page
+    }
+}
+
+impl Drop for WritePageGuard<'_, '_> {
+    fn drop(&mut self) {
+        self.bpm.unpin_page(self.page_id.unwrap(), false, AccessType::Unknown);
+    }
+}
+
 
 impl Page {
 
